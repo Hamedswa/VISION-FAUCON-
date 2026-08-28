@@ -1,0 +1,79 @@
+# ─────────────────────────────────────────────
+#  TRADING BOT — .gitignore
+#  Ne jamais commiter les clés API ni les logs
+# ─────────────────────────────────────────────
+
+# Variables d'environnement & secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.Python
+pip-log.txt
+
+# Environnements virtuels
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs & données runtime
+logs/
+*.log
+*.log.*
+data/cache/
+data/raw/
+*.csv
+*.parquet
+*.pkl
+*.pickle
+
+# Base de données locale
+*.db
+*.sqlite
+*.sqlite3
+
+# Tests & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE & éditeurs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# Railway
+.railway/
+
+# Backtesting outputs
+backtesting/results/
+backtesting/reports/
+
+# Dashboard static généré
+dashboard/static/generated/
