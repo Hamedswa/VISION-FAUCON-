@@ -1,13 +1,6 @@
-# database/__init__.py
-from .models import Base, Signal, Trade, Candle, OptimizerRun, PerformanceSnapshot
-from .db_manager import DatabaseManager
+# data/__init__.py
+from .oanda_client import OandaClient
+from .ccxt_client import CCXTClient
+from .data_manager import DataManager
 
-__all__ = [
-    "Base",
-    "Signal",
-    "Trade",
-    "Candle",
-    "OptimizerRun",
-    "PerformanceSnapshot",
-    "DatabaseManager",
-]
+__all__ = ["OandaClient", "CCXTClient", "DataManager"]
