@@ -1,0 +1,33 @@
+# ─────────────────────────────────────────────────────────────────
+#  TRADING BOT — Configuration Railway
+#  https://docs.railway.app/reference/config-as-code
+# ─────────────────────────────────────────────────────────────────
+
+[build]
+builder        = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand   = "python main.py"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+healthcheckPath    = "/api/status"
+healthcheckTimeout = 30
+
+# ── Variables d'environnement Railway ────────────────────────────
+# Ces variables sont à configurer dans le dashboard Railway
+# (Settings → Variables) — ne pas mettre les vraies valeurs ici
+
+# Variables injectées automatiquement par Railway :
+# DATABASE_URL → PostgreSQL plugin
+
+[[services]]
+name = "trading-bot"
+
+[services.deploy]
+numReplicas = 1       # Un seul bot actif à la fois
+
+# ── Volumes persistants ───────────────────────────────────────────
+# Pour les logs (optionnel — Railway réinitialise les volumes)
+# [[volumes]]
+# mountPath = "/app/logs"
