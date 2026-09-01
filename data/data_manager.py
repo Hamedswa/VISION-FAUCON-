@@ -1,29 +1,27 @@
 # data/data_manager.py
 # ─────────────────────────────────────────────────────────────────
 #  DataManager — Orchestrateur central des données
+#  Adapté pour MT5 (Exness) + Binance
 #
 #  Responsabilités :
 #   • Fetch OHLCV via Twelve Data (tous les instruments)
-#   • Cache en mémoire + base de données pour limiter les appels API
-#   • Conversion vers DataFrame pandas standardisé
-#   • Prix en temps réel (route vers OANDA ou CCXT selon instrument)
-#   • Fetch multi-timeframe en une seule opération
+#   • Cache mémoire pour limiter les appels API
+#   • Prix en temps réel (MT5 pour Forex/XAU, CCXT pour BTC)
+#   • Routing exécution → MT5 ou CCXT selon l'instrument
 # ─────────────────────────────────────────────────────────────────
 
 import asyncio
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional
 from twelve_data import TDClient
 from loguru import logger
 
 from config import settings
-from config.instruments import INSTRUMENTS, InstrumentConfig, get_instrument
-from .oanda_client import OandaClient
+from config.instruments import get_instrument, INSTRUMENTS
+from .mt5_client import MT5Client
 from .ccxt_client import CCXTClient
 
 
-# ── Mapping timeframes → format Twelve Data ────────────────────────
 TF_MAP = {
     "4h":    "4h",
     "1h":    "1h",
@@ -37,13 +35,15 @@ TF_MAP = {
 class DataManager:
     """
     Point d'entrée unique pour toutes les données marché.
-    Instancier une fois au démarrage et réutiliser partout.
+    MT5 → Exness (Forex + XAU)
+    CCXT → Binance (BTC)
+    Twelve Data → Données OHLCV pour tous
     """
 
     def __init__(self):
-        self._td      = TDClient(apikey=settings.TWELVE_DATA_KEY)
-        self._oanda   = OandaClient()
-        self._ccxt    = CCXTClient()
+        self._td    = TDClient(apikey=settings.TWELVE_DATA_KEY)
+        self._mt5   = MT5Client()
+        self._ccxt  = CCXTClient()
 
         # Cache mémoire : {(symbol, timeframe): (timestamp, DataFrame)}
         self._cache: dict[tuple, tuple[datetime, pd.DataFrame]] = {}
@@ -55,9 +55,21 @@ class DataManager:
             "1day":  timedelta(hours=23),
         }
 
-    # ── CLEANUP ───────────────────────────────────────────────────
+    # ── INITIALISATION ────────────────────────────────────────────
+
+    async def initialize(self):
+        """Connexion MT5 au démarrage."""
+        connected = await self._mt5.connect()
+        if not connected:
+            logger.warning(
+                "⚠️ MT5 non connecté — "
+                "Vérifie que MetaTrader 5 est ouvert et connecté"
+            )
+        return connected
 
     async def close(self):
+        """Fermeture propre des connexions."""
+        await self._mt5.disconnect()
         await self._ccxt.close()
         logger.info("DataManager fermé")
 
@@ -71,40 +83,22 @@ class DataManager:
         force_fetch: bool = False,
     ) -> pd.DataFrame:
         """
-        Retourne un DataFrame OHLCV pour un instrument et timeframe.
-
-        Stratégie de cache :
-          1. Cache mémoire (TTL selon timeframe) → ultra-rapide
-          2. Twelve Data API                     → fallback
-
-        Args:
-            symbol:      Ex "XAUUSD", "BTCUSD", "EURUSD"
-            timeframe:   Ex "4h", "1h", "15min", "5min"
-            output_size: Nombre de bougies (max 5000)
-            force_fetch: Ignore le cache et force un appel API
-
-        Returns:
-            DataFrame avec index DatetimeIndex et colonnes :
-            open, high, low, close + volume (0 si non dispo)
+        Retourne un DataFrame OHLCV via Twelve Data.
+        Cache mémoire avec TTL par timeframe.
         """
         cache_key = (symbol, timeframe)
-        ttl = self._cache_ttl.get(timeframe, timedelta(minutes=15))
+        ttl       = self._cache_ttl.get(timeframe, timedelta(minutes=15))
 
-        # ── Cache mémoire ─────────────────────────────────────────
         if not force_fetch and cache_key in self._cache:
             ts, df = self._cache[cache_key]
             if datetime.utcnow() - ts < ttl:
-                logger.debug(f"📦 Cache hit — {symbol} {timeframe}")
                 return df.copy()
 
-        # ── Twelve Data API ───────────────────────────────────────
-        instrument = get_instrument(symbol)
-        td_symbol  = instrument.twelve_data_symbol
-        td_tf      = TF_MAP.get(timeframe, timeframe)
+        instrument  = get_instrument(symbol)
+        td_symbol   = instrument.twelve_data_symbol
+        td_tf       = TF_MAP.get(timeframe, timeframe)
 
         df = await self._fetch_twelve_data(td_symbol, td_tf, output_size)
-
-        # Mise en cache
         self._cache[cache_key] = (datetime.utcnow(), df)
         return df.copy()
 
@@ -114,31 +108,25 @@ class DataManager:
         interval:    str,
         output_size: int,
     ) -> pd.DataFrame:
-        """
-        Appel API Twelve Data — exécuté dans un thread pool
-        (bibliothèque synchrone).
-        """
+        """Appel API Twelve Data dans un thread pool."""
         loop = asyncio.get_event_loop()
 
         def _fetch():
             ts = self._td.time_series(
-                symbol      = symbol,
-                interval    = interval,
-                outputsize  = output_size,
-                order       = "ASC",
-                timezone    = "UTC",
+                symbol     = symbol,
+                interval   = interval,
+                outputsize = output_size,
+                order      = "ASC",
+                timezone   = "UTC",
             )
             return ts.as_pandas()
 
         try:
             df = await loop.run_in_executor(None, _fetch)
-
-            # Standardisation des colonnes
             df.columns = [c.lower() for c in df.columns]
             df.index   = pd.to_datetime(df.index, utc=True)
             df.index.name = "timestamp"
 
-            # Colonnes obligatoires
             for col in ["open", "high", "low", "close"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -158,7 +146,7 @@ class DataManager:
             logger.error(f"Twelve Data fetch error ({symbol} {interval}): {e}")
             raise
 
-    # ── MULTI-TIMEFRAME EN UNE OPÉRATION ──────────────────────────
+    # ── MULTI-TIMEFRAME ───────────────────────────────────────────
 
     async def get_multi_tf(
         self,
@@ -166,12 +154,7 @@ class DataManager:
         timeframes:  list[str] | None = None,
         output_size: int = 200,
     ) -> dict[str, pd.DataFrame]:
-        """
-        Fetch H4, H1, M15, M5 en parallèle pour un instrument.
-
-        Returns:
-            {"4h": df_h4, "1h": df_h1, "15min": df_m15, "5min": df_m5}
-        """
+        """Fetch H4, H1, M15, M5 en parallèle."""
         tfs = timeframes or settings.TIMEFRAMES
 
         tasks = {
@@ -189,38 +172,38 @@ class DataManager:
                 logger.error(f"get_multi_tf error — {symbol} {tf}: {e}")
                 results[tf] = pd.DataFrame()
 
-        logger.info(
-            f"📊 Multi-TF {symbol} — "
-            + " | ".join(f"{tf}: {len(df)} bougies"
-                         for tf, df in results.items())
-        )
         return results
 
     # ── PRIX TEMPS RÉEL ───────────────────────────────────────────
 
     async def get_current_price(self, symbol: str) -> float:
         """
-        Retourne le prix mid actuel d'un instrument.
-        Route vers OANDA ou CCXT selon le broker de l'instrument.
+        Prix mid actuel.
+        → MT5 pour Forex/XAU (Exness)
+        → CCXT pour BTC (Binance)
         """
         instrument = get_instrument(symbol)
 
-        if instrument.broker == "oanda" and instrument.oanda_symbol:
-            data  = await self._oanda.get_price(instrument.oanda_symbol)
-            return data["mid"]
-        elif instrument.broker == "ccxt" and instrument.ccxt_symbol:
-            data  = await self._ccxt.get_price(instrument.ccxt_symbol)
-            return data["mid"]
-        else:
-            # Fallback : dernière clôture Twelve Data
-            df = await self.get_candles(symbol, "5min", output_size=5,
-                                        force_fetch=True)
-            return float(df["close"].iloc[-1])
+        if instrument.broker == "mt5" and instrument.mt5_symbol:
+            try:
+                data = await self._mt5.get_price(instrument.mt5_symbol)
+                return data["mid"]
+            except Exception as e:
+                logger.warning(f"MT5 price error {symbol}: {e}")
 
-    async def get_current_prices(
-        self, symbols: list[str]
-    ) -> dict[str, float]:
-        """Retourne les prix actuels de plusieurs instruments en parallèle."""
+        elif instrument.broker == "ccxt" and instrument.ccxt_symbol:
+            try:
+                data = await self._ccxt.get_price(instrument.ccxt_symbol)
+                return data["mid"]
+            except Exception as e:
+                logger.warning(f"CCXT price error {symbol}: {e}")
+
+        # Fallback : dernière clôture Twelve Data
+        df = await self.get_candles(symbol, "5min", output_size=5, force_fetch=True)
+        return float(df["close"].iloc[-1])
+
+    async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
+        """Prix actuels de plusieurs instruments en parallèle."""
         tasks = {
             s: asyncio.create_task(self.get_current_price(s))
             for s in symbols
@@ -236,45 +219,31 @@ class DataManager:
 
     # ── SOLDE & COMPTE ────────────────────────────────────────────
 
-    async def get_balance(self, broker: str = "oanda") -> float:
-        """Retourne le solde disponible sur un broker."""
-        if broker == "oanda":
-            return await self._oanda.get_balance()
+    async def get_balance(self, broker: str = "mt5") -> float:
+        """Retourne le solde disponible."""
+        if broker == "mt5":
+            return await self._mt5.get_balance()
         elif broker == "ccxt":
             return await self._ccxt.get_balance()
         return 0.0
 
     # ── ROUTING EXÉCUTION ────────────────────────────────────────
 
-    def get_oanda(self) -> OandaClient:
-        """Accès direct au client OANDA (pour order_manager)."""
-        return self._oanda
+    def get_mt5(self) -> MT5Client:
+        """Accès direct au client MT5."""
+        return self._mt5
 
     def get_ccxt(self) -> CCXTClient:
-        """Accès direct au client CCXT (pour order_manager)."""
+        """Accès direct au client CCXT (Binance)."""
         return self._ccxt
 
-    # ── UTILITAIRES ───────────────────────────────────────────────
-
-    def clear_cache(self, symbol: str | None = None):
-        """Vide le cache mémoire (global ou par instrument)."""
-        if symbol:
-            keys = [k for k in self._cache if k[0] == symbol]
-            for k in keys:
-                del self._cache[k]
-            logger.debug(f"🗑️ Cache vidé pour {symbol}")
-        else:
-            self._cache.clear()
-            logger.debug("🗑️ Cache complet vidé")
+    # ── VALIDATION CONNEXIONS ─────────────────────────────────────
 
     async def validate_connection(self) -> dict[str, bool]:
-        """
-        Vérifie que toutes les connexions API fonctionnent.
-        Utile au démarrage du bot.
-        """
+        """Vérifie toutes les connexions API au démarrage."""
         status = {
             "twelve_data": False,
-            "oanda":       False,
+            "mt5":         False,
             "ccxt":        False,
         }
 
@@ -284,22 +253,34 @@ class DataManager:
             status["twelve_data"] = True
             logger.info("✅ Twelve Data — connexion OK")
         except Exception as e:
-            logger.error(f"❌ Twelve Data — connexion FAILED: {e}")
+            logger.error(f"❌ Twelve Data — FAILED: {e}")
 
-        # OANDA
+        # MT5
         try:
-            await self._oanda.get_balance()
-            status["oanda"] = True
-            logger.info("✅ OANDA — connexion OK")
+            status["mt5"] = await self._mt5.is_connected()
+            if status["mt5"]:
+                logger.info("✅ MT5 Exness — connexion OK")
+            else:
+                logger.error("❌ MT5 Exness — non connecté")
         except Exception as e:
-            logger.error(f"❌ OANDA — connexion FAILED: {e}")
+            logger.error(f"❌ MT5 Exness — FAILED: {e}")
 
-        # CCXT
+        # CCXT Binance
         try:
             await self._ccxt.get_balance()
             status["ccxt"] = True
-            logger.info("✅ CCXT — connexion OK")
+            logger.info("✅ Binance — connexion OK")
         except Exception as e:
-            logger.warning(f"⚠️ CCXT — connexion FAILED (non bloquant): {e}")
+            logger.warning(f"⚠️ Binance — FAILED (non bloquant): {e}")
 
         return status
+
+    # ── UTILITAIRES ───────────────────────────────────────────────
+
+    def clear_cache(self, symbol: str | None = None):
+        if symbol:
+            keys = [k for k in self._cache if k[0] == symbol]
+            for k in keys:
+                del self._cache[k]
+        else:
+            self._cache.clear()
