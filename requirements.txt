@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────────────────────────
 #  TRADING BOT — Dépendances Python
-#  Compatible Python 3.11+
+#  Compatible Python 3.11+ Windows
 # ─────────────────────────────────────────────────────────────────
 
 # ── DATA & CALCULS MATHÉMATIQUES ─────────────────────────────────
@@ -12,8 +12,10 @@ scipy==1.13.1
 # ── SOURCE DONNÉES MARCHÉ ─────────────────────────────────────────
 twelve-data==1.2.12
 
-# ── EXÉCUTION ORDRES ─────────────────────────────────────────────
-oandapyV20==0.7.2
+# ── EXÉCUTION ORDRES — MT5 (Exness) ──────────────────────────────
+MetaTrader5==5.0.45
+
+# ── EXÉCUTION ORDRES — CCXT (Binance BTC) ────────────────────────
 ccxt==4.3.57
 
 # ── FILTRE ACTUALITÉS ────────────────────────────────────────────
